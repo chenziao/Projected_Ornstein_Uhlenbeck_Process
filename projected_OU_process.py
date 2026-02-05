@@ -1,4 +1,6 @@
 import numpy as np
+from scipy.special import softmax
+
 
 def ornstein_uhlenbeck(T=1, dt=1e-3, fc=1., mean=1., std=1., x0=None, nonnegative=True, rng=None):
     """
@@ -72,7 +74,7 @@ def proj_to_simplex(v, z=1):
 def projected_ou_magnitude(T, dt=1e-3, fc=1., mean=[1.], std=1., x0=None, nonnegative=True, rng=None):
     """
     Simulate N coupled Ornstein-Uhlenbeck processes with constant sum and non-negativity constraints
-        dX_i(t) = theta * (mu - X_i(t)) * dt + sigma_i * dW_i(t) + mu_i / C * lambda(t) * dt + dL_i(t)
+        dX_i(t) = theta * (mu_i - X_i(t)) * dt + sigma_i * dW_i(t) + mu_i / C * lambda(t) * dt + dL_i(t)
     where
         lambda(t)dt = - sum(theta * (mu_j - X_i(t)))dt - sum(sigma_i * dW_i(t))
     is the drift correction term to enforce sum constraint:
@@ -144,4 +146,71 @@ def projected_ou_magnitude(T, dt=1e-3, fc=1., mean=[1.], std=1., x0=None, nonneg
         correction = weights * (np.sum(drift) + np.sum(noise))
         x = X[i] + drift + noise - correction
         X[i + 1] = proj_to_simplex(x, C) if nonnegative else x + (C - np.sum(x)) / N
+    return t, X
+
+
+def softmax_ou(T, dt=1e-3, fc=1., mean=[1.], std=1., x0=None, rng=None):
+    """
+    Simulate N coupled processes with constant sum with underlying Ornstein-Uhlenbeck
+    process in logits. Softmax normalization is applied to constrain the sum of all variables.
+    The underlying OU processe in logits is
+        dZ_i(t) = theta * (mu_i - Z_i(t)) * dt + sigma * dW_i(t)
+    where mu_i = log(mean_i / C) and C = sum(mean_i).
+    The sum constraint is enforced by the softmax normalization:
+        X_i(t) = C * exp(Z_i(t)) / sum(exp(Z_j(t)))
+
+    Parameters
+    ----------
+    T : float
+        Total time (sec)
+    dt : float
+        Time step size (sec)
+    fc : float
+        Cutoff frequency (Hz) where power spectrum drops to half its maximum value
+        theta = 2 * pi * fc
+    mean : array of float
+        Long-term mean of each variable. Must be non-negative mean_i >= 0
+        Number of variables is determined by the length of this array
+        Sum of the variables = C = sum(mean_i)
+    std : float
+        Proportional to the 'beta' parameter in softmax normalization (inverse of the temperature parameter).
+        Standard deviation (in logits) of each underlying OU process variable
+        sigma_i = std * sqrt(2 * theta)
+    x0 : array of float
+        Initial value of each variable. If not provided, defaults to long-term mean
+    rng : Generator or int
+        Random number generator or seed
+
+    Returns
+    -------
+    t : array of time points (sec)
+    X : (steps, N) array of OU processes
+    """
+    mean = np.asarray(mean)
+    N = len(mean)
+    C = np.sum(mean)
+    assert all(mean >= 0)
+    if x0 is None:
+        x0 = mean
+    else:
+        x0 = np.asarray(x0)
+    assert all(mean >= 0) and all(x0 >= 0) and C > 0
+
+    theta = 2 * np.pi * fc
+    sigma = std * np.sqrt(2 * theta)
+    theta_dt = theta * dt
+    sigma_sqrt_dt = sigma * np.sqrt(dt)
+
+    n = max(int(T / dt), 0) + 1
+    t = np.arange(n) * dt
+    X = np.empty((n, N))
+    X[0] = np.log(x0 / np.sum(x0))  # log of normalized initial values
+    weights = np.log(mean / C)  # mean of each variable in the underlying OU process
+
+    rng = np.random.default_rng(rng)
+    xi = rng.normal(0, 1, size=(n - 1, N))
+    for i in range(n - 1):
+        dX = theta_dt * (weights - X[i]) + sigma_sqrt_dt * xi[i]
+        X[i + 1] = X[i] + dX
+    X = C * softmax(X, axis=1)  # softmax normalization sum up to constant C
     return t, X
